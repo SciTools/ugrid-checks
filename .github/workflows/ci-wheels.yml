@@ -48,7 +48,7 @@ jobs:
       with:
         python-version: "3.10"
 
-    - uses: actions/download-artifact@v7
+    - uses: actions/download-artifact@v8
       with:
         name: pypi-artifacts
         path: ${{ github.workspace }}/dist
