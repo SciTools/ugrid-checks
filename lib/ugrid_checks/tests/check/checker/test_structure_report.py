@@ -48,7 +48,7 @@ def nomesh_scan(cdl_scanner):
 def simple_scan_w_nonmesh(simple_scan):
     # Add an extra non-mesh dim and variable, for nonmesh output testing.
     scan = simple_scan
-    scan.dimensions["x_dim"] = NcDimSummary(3)
+    scan.dimensions["x_dim"] = NcDimSummary("x_dim", 3)
     scan.variables["x_data"] = NcVariableSummary(
         name="x_data", dimensions=("x_dim",), shape=(3,), dtype=np.int32
     )
@@ -284,7 +284,7 @@ class Test_StructureReport(DatasetChecker):
         scan = scan_2d_mesh
         self._add_edges(scan)
         # Add an extra dimension
-        scan.dimensions["face_n_edges"] = NcDimSummary(5)
+        scan.dimensions["face_n_edges"] = NcDimSummary("face_n_edges", 5)
         # This should appear in a non-mesh section
         text = self.get_report(scan, include_nonmesh=True)
         expects = [
@@ -310,7 +310,7 @@ class Test_StructureReport(DatasetChecker):
     def test_nonmesh_orphan_connectivity_dims(self, scan_0d_mesh):
         scan = scan_0d_mesh
         # Add an extra dim..
-        scan.dimensions["extra_dim"] = NcDimSummary(3)
+        scan.dimensions["extra_dim"] = NcDimSummary("extra_dim", 3)
         # .. which appears as a 'nonmesh' dim
         text = self.get_report(scan, include_nonmesh=True)
         expects = [

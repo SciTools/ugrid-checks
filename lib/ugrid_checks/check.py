@@ -16,6 +16,7 @@ from .scan_utils import (
     property_namelist,
     vars_w_props,
 )
+from .structure import UgridDataset, UgridDatavar, UgridLis, UgridMesh
 from .ugrid_logger import CheckLoggingInterface
 
 __all__ = ["Checker", "check_dataset"]
@@ -1703,6 +1704,19 @@ class Checker:
 
         return "\n".join(report_lines)
 
+    def _structure_reporter(self):
+        reporter = StructureReporter(
+            all_file_dims=self.file_scan.dimensions,
+            all_file_vars=self.file_scan.variables,
+            all_file_attrs=self.file_scan.attributes,
+            mesh_location_dims=self._all_mesh_dims,
+            mesh_vars=self._mesh_vars,
+            lis_vars=self._lis_vars,
+            meshdata_vars=self._meshdata_vars,
+            orphan_connectivities=self._orphan_connectivities,
+        )
+        return reporter
+
     def structure_report(self, include_nonmesh: bool = False) -> str:
         """
         Produce a text summary of the dataset UGRID structure.
@@ -1716,16 +1730,12 @@ class Checker:
         """
         # Implemented in separate 'reporter' class to organise the code better.
         # Create one, passing it all our key analysis info.
-        reporter = StructureReporter(
-            all_file_dims=self.file_scan.dimensions,
-            all_file_vars=self.file_scan.variables,
-            mesh_location_dims=self._all_mesh_dims,
-            mesh_vars=self._mesh_vars,
-            lis_vars=self._lis_vars,
-            meshdata_vars=self._meshdata_vars,
-            orphan_connectivities=self._orphan_connectivities,
-        )
+        reporter = self._structure_reporter()
         return reporter.report(include_nonmesh=include_nonmesh)
+
+    def structure_object(self):
+        reporter = self._structure_reporter()
+        return reporter.structure_info()
 
 
 class StructureReporter:
@@ -1744,6 +1754,7 @@ class StructureReporter:
         self,
         all_file_dims: Mapping[Text, NcDimSummary],
         all_file_vars: Mapping[Text, NcVariableSummary],
+        all_file_attrs: Mapping[Text, np.ndarray],
         mesh_location_dims: Dict[str, Dict[str, Union[None, str]]],
         mesh_vars: Dict[str, NcVariableSummary],
         lis_vars: Dict[str, NcVariableSummary],
@@ -1752,6 +1763,7 @@ class StructureReporter:
     ):
         self.all_file_dims = all_file_dims
         self.all_file_vars = all_file_vars
+        self.all_file_attrs = all_file_attrs
         self.mesh_location_dims = mesh_location_dims
         self.mesh_vars = mesh_vars
         self.lis_vars = lis_vars
@@ -1759,6 +1771,7 @@ class StructureReporter:
         self.meshdata_vars = meshdata_vars
         # Internals
         self.result_lines = []
+        self._struct: UgridDataset = UgridDataset()
 
     def _line(self, msg: Text, n_indent: int = 0):
         self.result_lines.append(self.indent * n_indent + msg)
@@ -1772,6 +1785,15 @@ class StructureReporter:
             names = str(names_attr).split(" ")
             result = ", ".join(f'"{name}"' for name in names)
         return result
+
+    def structure_info(self):
+        """Construct + return a structure object."""
+        self._struct = UgridDataset(global_attributes=self.all_file_attrs)
+        self._struct.dims.all = self.all_file_dims
+        self._struct.vars.all = self.all_file_vars
+        self._mesh_report()
+        self._nonmesh_calculate()
+        return self._struct
 
     def report(self, include_nonmesh: bool = False) -> str:
         """
@@ -1790,64 +1812,125 @@ class StructureReporter:
             self._nonmesh_report()
         return "\n".join(self.result_lines)
 
+    def _valid_var(self, var_name: str):
+        # Return var or None
+        return self.all_file_vars.get(str(var_name))
+
+    def _valid_vars_map(self, var_names: List[str]):
+        # Return dict of {name:var}, only valid vars
+        varsdict = {}
+        for name in var_names:
+            var = self.all_file_vars.get(str(name))
+            if name is not None:
+                varsdict[name] = var
+        return varsdict
+
     def _mesh_report(self):
         if not self.mesh_vars:
             self._line("Meshes : <none>")
         else:
             self._line("Meshes")
             for mesh_name, mesh_var in self.mesh_vars.items():
+                struct_mesh = UgridMesh(name=mesh_name, var=mesh_var)
                 self._line(f'"{mesh_name}"', 1)
                 dims = self.mesh_location_dims[mesh_name]
                 # Nodes is a bit 'special'
                 dim = dims["node"]
                 if not dim:
                     self._line("<? no node coordinates or dimension ?>", 2)
+                    struct_mesh = None
                 else:
                     self._line(f'node("{dim}")', 2)
                     coords = self._varlist_str(mesh_var, "node_coordinates")
                     self._line(f"coordinates : {coords}", 3)
+                    coords = mesh_var.attributes.get("node_coordinates", "")
+                    coords = str(coords).split()
+                    struct_mesh.coords.node = self._valid_vars_map(coords)
                 # Other dims all reported in the same way
                 for location in ("edge", "face", "boundary"):
                     dim = dims[location]
                     if dim:
                         self._line(f'{location}("{dim}")', 2)
-                        attr_name = f"{location}_node_connectivity"
-                        conn_str = self._varlist_str(mesh_var, attr_name)
-                        self._line(f"{attr_name} : {conn_str}", 3)
-                        coord_name = f"{location}_coordinates"
-                        if coord_name in mesh_var.attributes:
-                            coords = self._varlist_str(mesh_var, coord_name)
+                        connattr_name = f"{location}_node_connectivity"
+                        conn_str = self._varlist_str(mesh_var, connattr_name)
+                        self._line(f"{connattr_name} : {conn_str}", 3)
+                        coords_attrname = f"{location}_coordinates"
+                        if coords_attrname in mesh_var.attributes:
+                            coords = self._varlist_str(
+                                mesh_var, coords_attrname
+                            )
                             self._line(f"coordinates : {coords}", 3)
+
+                        if struct_mesh is not None:
+                            conn_name = mesh_var.attributes.get(connattr_name)
+                            conn = self._valid_var(conn_name)
+                            struct_mesh.conns[connattr_name] = conn
+                            coords_attr = mesh_var.attributes.get(
+                                coords_attrname
+                            )
+                            coord_varnames = property_namelist(coords_attr)
+                            coords = self._valid_vars_map(coord_varnames)
+                            setattr(struct_mesh.coords, location, coords)
                 # List *optional* connectivities of the mesh
                 # N.B. the "<x>_node..." are required connectivities, which
                 # are displayed above, under their locations.
                 # Now display any others (optional) in a separate section.
                 optional_conns = []
-                for attr_name in _VALID_CONNECTIVITY_ROLES:
-                    if attr_name.split("_")[1] != "node":
+                for connattr_name in _VALID_CONNECTIVITY_ROLES:
+                    if connattr_name.split("_")[1] != "node":
                         attr_value = property_as_single_name(
-                            mesh_var.attributes.get(attr_name)
+                            mesh_var.attributes.get(connattr_name)
                         )
                         if attr_value:
                             if attr_value in self.all_file_vars:
                                 attr_text = f'"{attr_value}"'
+                                if struct_mesh is not None:
+                                    struct_mesh.conns[
+                                        connattr_name
+                                    ] = self._valid_var(attr_value)
                             else:
                                 attr_text = f'<?nonexistent?> "{attr_value}"'
-                            optional_conns.append((attr_name, attr_text))
+                            optional_conns.append((connattr_name, attr_text))
 
                 if optional_conns:
                     self._line("optional connectivities", 2)
-                    for attr_name, attr_text in optional_conns:
-                        self._line(f"{attr_name} : {attr_text}", 3)
+                    for connattr_name, attr_text in optional_conns:
+                        self._line(f"{connattr_name} : {attr_text}", 3)
+
+            if struct_mesh is not None:
+                self._struct.meshes[mesh_name] = struct_mesh
 
         if self.lis_vars:
             self._line("")
             self._line("Location Index Sets")
             for lis_name, lis_var in self.lis_vars.items():
-                mesh = lis_var.attributes.get("mesh", "? <none>")
-                location = lis_var.attributes.get("location", "? <none>")
+                mesh = lis_var.attributes.get("mesh")
+                if mesh is not None:
+                    mesh = str(mesh)
+                location = lis_var.attributes.get("location")
+                if location is not None:
+                    location = str(location)
                 dims = self.mesh_location_dims.get(lis_name, {})
-                dim_name = dims.get(str(location), "? <none>")
+                dim_name = dims.get(str(location))
+                valid = (
+                    mesh in self._struct.meshes
+                    and location is not None
+                    and dims is not None
+                )
+                if valid:
+                    self._struct.lises[lis_name] = UgridLis(
+                        name=lis_name,
+                        mesh=self._struct.meshes[mesh_name],
+                        location=location,
+                        datavars={},
+                        var=lis_var,
+                    )
+                if location is None:
+                    location = "? <none>"
+                if mesh is None:
+                    mesh = "? <none>"
+                if dim_name is None:
+                    dim_name = "? <none>"
                 self._line(f'"{lis_name}" ({dim_name})', 1)
                 self._line(f'mesh : "{mesh}"', 2)
                 self._line(f"location : {location}", 2)
@@ -1886,19 +1969,50 @@ class StructureReporter:
                         ("location", True),
                         ("location_index_set", False),
                     ]
-                for attr_name, expected in order_and_expected:
-                    attr = attrs[attr_name]
+                valid = False
+                for connattr_name, expected in order_and_expected:
+                    attr = attrs[connattr_name]
                     value = None
                     if attr:
-                        value = self._varlist_str(var, attr_name)
+                        value = self._varlist_str(var, connattr_name)
                         if not expected:
                             value = f"<?unexpected?> {value}"
+                            valid = False
                     elif expected:
                         value = "<?missing?>"
+                        valid = False
                     if value:
-                        self._line(f"{attr_name} : {value}", 2)
+                        self._line(f"{connattr_name} : {value}", 2)
 
-    def _nonmesh_report(self):
+                valid = True
+                mesh = attrs["mesh"]
+                location = attrs["location"]
+                lis = attrs["location_index_set"]
+                if mesh is not None:
+                    mesh = self._struct.meshes.get(str(mesh))
+                    if mesh is None:
+                        valid = False
+                if lis is not None:
+                    lis = self._struct.lises.get(str(mesh))
+                    if lis is None:
+                        valid = False
+                if lis is not None:
+                    valid = mesh is None and location is None
+                else:
+                    valid = mesh is not None and location is not None
+                    if valid:
+                        location = str(location)
+                        valid = location in _VALID_UGRID_LOCATIONS
+                if valid:
+                    self._struct.datavars[var_name] = UgridDatavar(
+                        name=var_name,
+                        lis=lis,
+                        mesh=mesh,
+                        location=location,
+                        var=var,
+                    )
+
+    def _nonmesh_calculate(self, output_struct: UgridDataset = None):
         # A non-mesh var is one that is not referenced by any UGRID mesh
         # components.
         all_mesh_varnames = (
@@ -1947,17 +2061,22 @@ class StructureReporter:
         for conn_var in self.orphan_connectivities.values():
             nonmesh_dims -= set(conn_var.dimensions)
 
+        self._nonmesh_dims = nonmesh_dims
+        self._nonmesh_vars = nonmesh_vars
+
+    def _nonmesh_report(self):
+        self._nonmesh_calculate()
         # Add report section, if any nonmesh found.
-        if nonmesh_dims or nonmesh_vars:
+        if self._nonmesh_dims or self._nonmesh_vars:
             self._line("")
             self._line("Non-mesh variables and/or dimensions")
-            if nonmesh_dims:
+            if self._nonmesh_dims:
                 self._line("dimensions:", 1)
-                for dim in sorted(nonmesh_dims):
+                for dim in sorted(self._nonmesh_dims):
                     self._line(f'"{dim}"', 2)
-            if nonmesh_vars:
+            if self._nonmesh_vars:
                 self._line("variables:", 1)
-                for var in sorted(nonmesh_vars):
+                for var in sorted(self._nonmesh_vars):
                     self._line(f'"{var}"', 2)
 
 
