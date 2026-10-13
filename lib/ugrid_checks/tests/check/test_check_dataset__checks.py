@@ -368,8 +368,8 @@ class DatasetChecker:
         meshvar = scan.variables["topology"]
         # Check we have the 2d scan, as 1d defines a different edges dim
         assert meshvar.attributes["topology_dimension"] == 2
-        scan.dimensions["edges"] = NcDimSummary(n_edges)
-        scan.dimensions["n_edge_ends"] = NcDimSummary(2)
+        scan.dimensions["edges"] = NcDimSummary("edges", n_edges)
+        scan.dimensions["n_edge_ends"] = NcDimSummary("n_edge_ends", 2)
         edgenodes_name = "edge_nodes"
         scan.variables[edgenodes_name] = NcVariableSummary(
             name=edgenodes_name,
@@ -393,7 +393,7 @@ class DatasetChecker:
 
         """
         # Now add the (optional) face-edge connectivity.
-        scan.dimensions["face_n_edges"] = NcDimSummary(4)
+        scan.dimensions["face_n_edges"] = NcDimSummary("face_n_edges", 4)
         faceedge_name = "face_edges_var"
         edgeface_conn = NcVariableSummary(
             name=faceedge_name,
@@ -413,7 +413,7 @@ class DatasetChecker:
         # Add a new location-index-set dimension, and variable
         location = scan.variables["sample_data"].attributes["location"]
         lis_dim_name = f"lis_{location}s"
-        scan.dimensions[lis_dim_name] = NcDimSummary(3)
+        scan.dimensions[lis_dim_name] = NcDimSummary(lis_dim_name, 3)
         lis_name = "lis"
         scan.variables[lis_name] = NcVariableSummary(
             name=lis_name,
@@ -672,8 +672,8 @@ class TestChecker_MeshVariables(DatasetChecker):
         scan, meshvar = scan_0d_and_meshvar
         # Add extra dims and a variable, to mimic edge-node connectivity.
         # (which is not valid in a 0-d mesh)
-        scan.dimensions["edges"] = NcDimSummary(3)
-        scan.dimensions["edge_ends"] = NcDimSummary(2)
+        scan.dimensions["edges"] = NcDimSummary("edges", 3)
+        scan.dimensions["edge_ends"] = NcDimSummary("edge_ends", 2)
         edgenodes_name = "fake_edge_nodes"
         scan.variables[edgenodes_name] = NcVariableSummary(
             name=edgenodes_name,
@@ -714,8 +714,8 @@ class TestChecker_MeshVariables(DatasetChecker):
         scan, meshvar = scan_0d_and_meshvar
         # Add extra dims + a variable, to mimic face-node connectivity.
         # (which is not valid in a 0-d mesh)
-        scan.dimensions["faces"] = NcDimSummary(3)
-        scan.dimensions["face_vertices"] = NcDimSummary(4)
+        scan.dimensions["faces"] = NcDimSummary("faces", 3)
+        scan.dimensions["face_vertices"] = NcDimSummary("face_vertices", 4)
         facenodes_name = "fake_face_nodes"
         scan.variables[facenodes_name] = NcVariableSummary(
             name=facenodes_name,
@@ -737,8 +737,8 @@ class TestChecker_MeshVariables(DatasetChecker):
         scan, meshvar = scan_1d_and_meshvar
         # Add extra dims and a variable, to mimic a bounds connectivity.
         # (which is not valid in a 1-d mesh)
-        scan.dimensions["bounds"] = NcDimSummary(3)
-        scan.dimensions["bounds_ends"] = NcDimSummary(2)
+        scan.dimensions["bounds"] = NcDimSummary("bounds", 3)
+        scan.dimensions["bounds_ends"] = NcDimSummary("bounds_ends", 2)
         boundnodes_name = "fake_bounds"
         scan.variables[boundnodes_name] = NcVariableSummary(
             name=boundnodes_name,
@@ -788,8 +788,8 @@ class TestChecker_MeshVariables(DatasetChecker):
 
         # First add edges and a face-edges map to the 2d mesh
         # (because there are no optional edge connectivities in a 1d mesh)
-        scan.dimensions["edge_dim"] = NcDimSummary(3, False)
-        scan.dimensions["n_edge_ends"] = NcDimSummary(2, False)
+        scan.dimensions["edge_dim"] = NcDimSummary("edge_dim", 3)
+        scan.dimensions["n_edge_ends"] = NcDimSummary("n_edge_ends", 2)
         edgenodes_name = "edge_nodes_var"
         edgenodes_conn = NcVariableSummary(
             name=edgenodes_name,
@@ -870,8 +870,8 @@ class TestChecker_MeshVariables(DatasetChecker):
         scan, meshvar = scan_1d_and_meshvar
         # Add extra dims + a variable to mimic a 'face-face' connectivity.
         # (which is not valid in a 1-d mesh)
-        scan.dimensions["faces"] = NcDimSummary(3)
-        scan.dimensions["face_N_faces"] = NcDimSummary(4)
+        scan.dimensions["faces"] = NcDimSummary("faces", 3)
+        scan.dimensions["face_N_faces"] = NcDimSummary("face_N_faces", 4)
         faceface_name = "fake_face_faces"
         scan.variables[faceface_name] = NcVariableSummary(
             name=faceface_name,
@@ -891,8 +891,8 @@ class TestChecker_MeshVariables(DatasetChecker):
         scan, meshvar = scan_1d_and_meshvar
         # Add extra dims + a variable, to mimic face-edge connectivity.
         # (which is not valid for a 1-d mesh)
-        scan.dimensions["faces"] = NcDimSummary(5)
-        scan.dimensions["face_N_edges"] = NcDimSummary(3)
+        scan.dimensions["faces"] = NcDimSummary("faces", 5)
+        scan.dimensions["face_N_edges"] = NcDimSummary("face_N_edges", 3)
         faceedges_name = "fake_face_edges"
         scan.variables[faceedges_name] = NcVariableSummary(
             name=faceedges_name,
@@ -913,7 +913,7 @@ class TestChecker_MeshVariables(DatasetChecker):
         meshvar = scan.variables["topology"]
         # Add extra dims + a variable, to mimic face-edge connectivity.
         # (which is not valid, as the mesh has no edges)
-        scan.dimensions["face_N_edges"] = NcDimSummary(3)
+        scan.dimensions["face_N_edges"] = NcDimSummary("face_N_edges", 3)
         faceedges_name = "fake_face_edges"
         scan.variables[faceedges_name] = NcVariableSummary(
             name=faceedges_name,
@@ -933,8 +933,8 @@ class TestChecker_MeshVariables(DatasetChecker):
         scan, meshvar = scan_1d_and_meshvar
         # Add extra dims + a variable, to mimic edge-face connectivity.
         # (which is not valid for a 1-d mesh)
-        scan.dimensions["edges"] = NcDimSummary(5)
-        scan.dimensions["edge_N_faces"] = NcDimSummary(3)
+        scan.dimensions["edges"] = NcDimSummary("edges", 5)
+        scan.dimensions["edge_N_faces"] = NcDimSummary("edge_N_faces", 3)
         edgefaces_name = "fake_edge_faces"
         scan.variables[edgefaces_name] = NcVariableSummary(
             name=edgefaces_name,
@@ -954,8 +954,8 @@ class TestChecker_MeshVariables(DatasetChecker):
         scan, meshvar = scan_2d_and_meshvar
         # Add extra dims + a variable, to mimic edge-face connectivity.
         # (which is not valid as the mesh has no edges)
-        scan.dimensions["edges"] = NcDimSummary(5)
-        scan.dimensions["edge_N_faces"] = NcDimSummary(3)
+        scan.dimensions["edges"] = NcDimSummary("edges", 5)
+        scan.dimensions["edge_N_faces"] = NcDimSummary("edge_N_faces", 3)
         edgefaces_name = "fake_edge_faces"
         scan.variables[edgefaces_name] = NcVariableSummary(
             name=edgefaces_name,
@@ -1261,8 +1261,8 @@ class TestChecker_Coords(DatasetChecker):
         coord = scan.variables["longitude"]
         # Add face-lon bounds, with inappropriate dims.
         # N.B. match the expected dim *lengths*, to avoid additional errors
-        scan.dimensions["extra1"] = NcDimSummary(6)
-        scan.dimensions["extra2"] = NcDimSummary(4)
+        scan.dimensions["extra1"] = NcDimSummary("extra1", 6)
+        scan.dimensions["extra2"] = NcDimSummary("extra2", 4)
         facelon_bds_name = "node_lons_bounds"
         scan.variables[facelon_bds_name] = NcVariableSummary(
             name=facelon_bds_name,
@@ -1441,7 +1441,7 @@ class TestChecker_Coords(DatasetChecker):
             },
         )
         scan.variables["topology"].attributes["face_coordinates"] = "face_x"
-        scan.dimensions["face_bnds"] = NcDimSummary(4)
+        scan.dimensions["face_bnds"] = NcDimSummary("face_bnds", 4)
         bounds_points = [[0.0, 0.0, 1.0, 1.0], [1.0, 1.0, 2.0, 99.0]]
         bounds_points = np.ma.masked_greater(bounds_points, 10)
         bdsvar = NcVariableSummary(
@@ -1559,7 +1559,7 @@ class TestChecker_Connectivities(DatasetChecker):
         scan, conn = scan_2d_and_connvar
         self._add_edges(scan)
         # Adjust the length of the 'n_edge_ends' dim : this is the error.
-        scan.dimensions["n_edge_ends"] = NcDimSummary(7)
+        scan.dimensions["n_edge_ends"] = NcDimSummary("n_edge_ends", 7)
         msg = (
             '"edge_nodes".* contains the non-mesh dimension "n_edge_ends", '
             r"but this has length 7 instead of 2\."
@@ -1975,7 +1975,7 @@ class TestChecker_LocationIndexSets(DatasetChecker):
 
     def test_a404_conn_dim_longerthanparent(self, scan_0d_and_lis):
         scan, lis_var = scan_0d_and_lis
-        scan.dimensions["lis_nodes"] = NcDimSummary(17)
+        scan.dimensions["lis_nodes"] = NcDimSummary("lis_nodes", 17)
         msg = (
             '"lis" has dimension "lis_nodes", length 17.*'
             "longer than the node dimension of the parent "
