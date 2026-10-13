@@ -1,6 +1,6 @@
 from pathlib import Path
 import re
-from typing import AnyStr, Dict, List, Mapping, Text, Tuple, Union
+from typing import AnyStr, Dict, List, Text, Tuple, Union
 
 import numpy as np
 
@@ -18,7 +18,7 @@ from .scan_utils import (
 )
 from .ugrid_logger import CheckLoggingInterface
 
-__all__ = ["Checker", "check_dataset"]
+__all__ = ["Checker", "StructureAnalysis", "check_dataset"]
 
 _VALID_UGRID_LOCATIONS = [
     "node",
@@ -59,6 +59,270 @@ _VALID_CF_CF_ROLES = [
 # FOR NOW: allow a Python "normal word character", followed by anything except
 # the forward-slash and space.
 _VALID_NAME_REGEX = re.compile(r"^\w[^ /]*$")
+
+
+class StructureAnalysis:
+    """
+    A class which decribes the mesh structure of a dataset, and can produce
+    a structure report (string).
+
+    This is created from a Checker, to identify variables and dimensions with
+    key UGRID roles, and provide a mesh/location map of the dimensions.
+
+    It also identifies the non-mesh dimensions + variables.
+
+    """
+
+    _indent = "    "  # common usage for the report methods
+
+    def __init__(
+        self,
+        all_file_dims: Dict[Text, NcDimSummary],
+        all_file_vars: Dict[Text, NcVariableSummary],
+        mesh_location_dims: Dict[str, Dict[str, Union[None, str]]],
+        mesh_vars: Dict[str, NcVariableSummary],
+        lis_vars: Dict[str, NcVariableSummary],
+        meshdata_vars: Dict[str, NcVariableSummary],
+        orphan_connectivities: Dict[str, NcVariableSummary],
+    ):
+        #: a map name:dim-summary of all dimensions in the file
+        self.all_file_dims: Dict[Text, NcDimSummary] = all_file_dims
+        #: a map name:var-summary of all variables in the file
+        self.all_file_vars: Dict[Text, NcVariableSummary] = all_file_vars
+        #: a map name:var-summary of mesh-topology variables in the file
+        self.mesh_vars: Dict[Text, NcVariableSummary] = mesh_vars
+        #: a map name:var-summary of location-index-set variables in the file
+        self.lis_vars: Dict[str, NcVariableSummary] = lis_vars
+        #: a map name:var-summary of mesh-data variables in the file
+        #: (variables with either 'mesh' or 'location_index_set' attributes)
+        self.meshdata_vars: Dict[str, NcVariableSummary] = meshdata_vars
+        #: a map name:var-summary of any mesh-connectivity variables in the
+        #: file which are *not* referenced by a mesh
+        self.orphan_connectivities: Dict[
+            str, NcVariableSummary
+        ] = orphan_connectivities
+        #: a map mesh-name: map(location-name: dimension-name) for all the
+        #: meshes and their dimensions
+        self.mesh_location_dims: Dict[
+            str, Dict[str, Union[None, str]]
+        ] = mesh_location_dims
+        #: a map name:dim-summary of all non-mesh dimensions
+        self.nonmesh_dims: Dict[Text, NcDimSummary] = {}
+        #: a map name:var-summary of all non-mesh variables
+        self.nonmesh_vars: Dict[str, NcVariableSummary] = {}
+        # Initialise the non-mesh components (populate the last 2 variables)
+        self._calculate_nonmesh_dims_and_vars()
+        # Internals : state variable used in building reports.
+        self._result_lines: List[str] = []
+
+    def _line(self, msg: Text, n_indent: int = 0):
+        self._result_lines.append(self._indent * n_indent + msg)
+
+    @staticmethod
+    def _varlist_str(var: NcVariableSummary, attr_name: str) -> str:
+        names_attr = var.attributes.get(attr_name)
+        if not names_attr:
+            result = "? <none>"
+        else:
+            names = str(names_attr).split(" ")
+            result = ", ".join(f'"{name}"' for name in names)
+        return result
+
+    def report(self, include_nonmesh: bool = False) -> str:
+        """
+        Produce a text summary of dataset structure.
+
+        Parameters
+        ----------
+        include_nonmesh : bool, default False
+            If set, also output a list of file dimensions and variables *not*
+            relating to the UGRID meshes contained.
+
+        """
+        self._result_lines = []
+        self._mesh_report()
+        if include_nonmesh:
+            self._nonmesh_report()
+        return "\n".join(self._result_lines)
+
+    def _mesh_report(self):
+        if not self.mesh_vars:
+            self._line("Meshes : <none>")
+        else:
+            self._line("Meshes")
+            for mesh_name, mesh_var in self.mesh_vars.items():
+                self._line(f'"{mesh_name}"', 1)
+                dims = self.mesh_location_dims[mesh_name]
+                # Nodes is a bit 'special'
+                dim = dims["node"]
+                if not dim:
+                    self._line("<? no node coordinates or dimension ?>", 2)
+                else:
+                    self._line(f'node("{dim}")', 2)
+                    coords = self._varlist_str(mesh_var, "node_coordinates")
+                    self._line(f"coordinates : {coords}", 3)
+                # Other dims all reported in the same way
+                for location in ("edge", "face", "boundary"):
+                    dim = dims[location]
+                    if dim:
+                        self._line(f'{location}("{dim}")', 2)
+                        attr_name = f"{location}_node_connectivity"
+                        conn_str = self._varlist_str(mesh_var, attr_name)
+                        self._line(f"{attr_name} : {conn_str}", 3)
+                        coord_name = f"{location}_coordinates"
+                        if coord_name in mesh_var.attributes:
+                            coords = self._varlist_str(mesh_var, coord_name)
+                            self._line(f"coordinates : {coords}", 3)
+                # List *optional* connectivities of the mesh
+                # N.B. the "<x>_node..." are required connectivities, which
+                # are displayed above, under their locations.
+                # Now display any others (optional) in a separate section.
+                optional_conns = []
+                for attr_name in _VALID_CONNECTIVITY_ROLES:
+                    if attr_name.split("_")[1] != "node":
+                        attr_value = property_as_single_name(
+                            mesh_var.attributes.get(attr_name)
+                        )
+                        if attr_value:
+                            if attr_value in self.all_file_vars:
+                                attr_text = f'"{attr_value}"'
+                            else:
+                                attr_text = f'<?nonexistent?> "{attr_value}"'
+                            optional_conns.append((attr_name, attr_text))
+
+                if optional_conns:
+                    self._line("optional connectivities", 2)
+                    for attr_name, attr_text in optional_conns:
+                        self._line(f"{attr_name} : {attr_text}", 3)
+
+        if self.lis_vars:
+            self._line("")
+            self._line("Location Index Sets")
+            for lis_name, lis_var in self.lis_vars.items():
+                mesh = lis_var.attributes.get("mesh", "? <none>")
+                location = lis_var.attributes.get("location", "? <none>")
+                dims = self.mesh_location_dims.get(lis_name, {})
+                dim_name = dims.get(str(location), "? <none>")
+                self._line(f'"{lis_name}" ({dim_name})', 1)
+                self._line(f'mesh : "{mesh}"', 2)
+                self._line(f"location : {location}", 2)
+
+        if self.orphan_connectivities:
+            self._line("")
+            self._line("?? Connectivities with no mesh ??")
+            for conn_name, conn_var in self.orphan_connectivities.items():
+                dims = ", ".join(f'"{dim}"' for dim in conn_var.dimensions)
+                self._line(f'"{conn_name}" ({dims})', 1)
+                cf_role = self._varlist_str(conn_var, "cf_role")
+                self._line(f"cf_role = {cf_role}", 2)
+
+        if self.meshdata_vars:
+            self._line("")
+            self._line("Mesh Data Variables")
+            for var_name, var in self.meshdata_vars.items():
+                self._line(f'"{var_name}"', 1)
+                attrs = {
+                    attr_name: var.attributes.get(attr_name)
+                    for attr_name in ("mesh", "location", "location_index_set")
+                }
+                # 'treat as' mirrors logic in 'Checker.check_meshdata_var'
+                treat_as_lis = attrs["location_index_set"] and (
+                    not attrs["mesh"] or not attrs["location"]
+                )
+                if treat_as_lis:
+                    order_and_expected = [
+                        ("location_index_set", True),
+                        ("mesh", False),
+                        ("location", False),
+                    ]
+                else:
+                    order_and_expected = [
+                        ("mesh", True),
+                        ("location", True),
+                        ("location_index_set", False),
+                    ]
+                for attr_name, expected in order_and_expected:
+                    attr = attrs[attr_name]
+                    value = None
+                    if attr:
+                        value = self._varlist_str(var, attr_name)
+                        if not expected:
+                            value = f"<?unexpected?> {value}"
+                    elif expected:
+                        value = "<?missing?>"
+                    if value:
+                        self._line(f"{attr_name} : {value}", 2)
+
+    def _calculate_nonmesh_dims_and_vars(self):
+        # A non-mesh var is one that is not referenced by any UGRID mesh
+        # components.
+        all_mesh_varnames = (
+            set(self.mesh_vars.keys())
+            | set(self.lis_vars.keys())
+            | set(self.meshdata_vars.keys())
+            | set(self.orphan_connectivities.keys())
+        )
+        nonmesh_vars = set(self.all_file_vars.keys()) - all_mesh_varnames
+
+        # A mesh dimension is one that is a location dim of any
+        # mesh, or any connectivity (e.g. includes dims used for
+        # nodes of a face).
+        nonmesh_dims = set(self.all_file_dims.keys())
+
+        # Exclude from 'nonmesh' : all dims and vars of each mesh.
+        for meshvar in self.mesh_vars.values():
+            # Exclude all mesh location dims.
+            mesh_dims = self.mesh_location_dims[meshvar.name]
+            nonmesh_dims -= set(mesh_dims.values())
+
+            # Exclude all location coordinates, and their bounds vars.
+            for location in _VALID_UGRID_LOCATIONS:
+                attrname = f"{location}_coordinates"
+                attr = meshvar.attributes.get(attrname)
+                location_coord_names = property_namelist(attr)
+                nonmesh_vars -= set(location_coord_names)
+                for coord_name in location_coord_names:
+                    coord_var = self.all_file_vars.get(coord_name)
+                    bounds_attr = coord_var.attributes.get("bounds")
+                    bounds_varname = property_as_single_name(bounds_attr)
+                    if bounds_varname:
+                        nonmesh_vars.discard(bounds_varname)
+
+            # Exclude all connectivities, and all their dims.
+            for attrname in _VALID_CONNECTIVITY_ROLES:
+                conn_attr = meshvar.attributes.get(attrname)
+                conn_name = property_as_single_name(conn_attr)
+                if conn_name:
+                    nonmesh_vars.discard(conn_name)
+                    conn_var = self.all_file_vars.get(conn_name)
+                    if conn_var:
+                        nonmesh_dims -= set(conn_var.dimensions)
+
+        # Also exclude all dimensions of 'orphan' connectivities.
+        for conn_var in self.orphan_connectivities.values():
+            nonmesh_dims -= set(conn_var.dimensions)
+
+        # Convert name-sets to dictionaries of summary objects
+        self.nonmesh_dims = {
+            name: self.all_file_dims.get(name) for name in sorted(nonmesh_dims)
+        }
+        self.nonmesh_vars = {
+            name: self.all_file_vars.get(name) for name in sorted(nonmesh_vars)
+        }
+
+    def _nonmesh_report(self):
+        """Add a nonmesh report section, if any nonmesh found."""
+        if self.nonmesh_dims or self.nonmesh_vars:
+            self._line("")
+            self._line("Non-mesh variables and/or dimensions")
+            if self.nonmesh_dims:
+                self._line("dimensions:", 1)
+                for dim in sorted(self.nonmesh_dims.keys()):
+                    self._line(f'"{dim}"', 2)
+            if self.nonmesh_vars:
+                self._line("variables:", 1)
+                for var in sorted(self.nonmesh_vars.keys()):
+                    self._line(f'"{var}"', 2)
 
 
 class Checker:
@@ -1703,6 +1967,21 @@ class Checker:
 
         return "\n".join(report_lines)
 
+    def file_structure(self) -> StructureAnalysis:
+        """Produce a summary of the dataset UGRID structure."""
+        # Implemented in separate 'analysis' class to organise the code better.
+        # Create one, passing it all our key analysis info.
+        structure = StructureAnalysis(
+            all_file_dims=self.file_scan.dimensions,
+            all_file_vars=self.file_scan.variables,
+            mesh_location_dims=self._all_mesh_dims,
+            mesh_vars=self._mesh_vars,
+            lis_vars=self._lis_vars,
+            meshdata_vars=self._meshdata_vars,
+            orphan_connectivities=self._orphan_connectivities,
+        )
+        return structure
+
     def structure_report(self, include_nonmesh: bool = False) -> str:
         """
         Produce a text summary of the dataset UGRID structure.
@@ -1714,251 +1993,7 @@ class Checker:
             relating to the UGRID meshes contained.
 
         """
-        # Implemented in separate 'reporter' class to organise the code better.
-        # Create one, passing it all our key analysis info.
-        reporter = StructureReporter(
-            all_file_dims=self.file_scan.dimensions,
-            all_file_vars=self.file_scan.variables,
-            mesh_location_dims=self._all_mesh_dims,
-            mesh_vars=self._mesh_vars,
-            lis_vars=self._lis_vars,
-            meshdata_vars=self._meshdata_vars,
-            orphan_connectivities=self._orphan_connectivities,
-        )
-        return reporter.report(include_nonmesh=include_nonmesh)
-
-
-class StructureReporter:
-    """
-    A class which can produce a structure report on a dataset.
-
-    This is based on data provided by a Checker, to identify the variables
-    by role and build a dimensions map.
-    Provided as a separate class purely to enable clearer coding.
-
-    """
-
-    indent = "    "
-
-    def __init__(
-        self,
-        all_file_dims: Mapping[Text, NcDimSummary],
-        all_file_vars: Mapping[Text, NcVariableSummary],
-        mesh_location_dims: Dict[str, Dict[str, Union[None, str]]],
-        mesh_vars: Dict[str, NcVariableSummary],
-        lis_vars: Dict[str, NcVariableSummary],
-        meshdata_vars: Dict[str, NcVariableSummary],
-        orphan_connectivities: Dict[str, NcVariableSummary],
-    ):
-        self.all_file_dims = all_file_dims
-        self.all_file_vars = all_file_vars
-        self.mesh_location_dims = mesh_location_dims
-        self.mesh_vars = mesh_vars
-        self.lis_vars = lis_vars
-        self.orphan_connectivities = orphan_connectivities
-        self.meshdata_vars = meshdata_vars
-        # Internals
-        self.result_lines = []
-
-    def _line(self, msg: Text, n_indent: int = 0):
-        self.result_lines.append(self.indent * n_indent + msg)
-
-    @staticmethod
-    def _varlist_str(var: NcVariableSummary, attr_name: str) -> str:
-        names_attr = var.attributes.get(attr_name)
-        if not names_attr:
-            result = "? <none>"
-        else:
-            names = str(names_attr).split(" ")
-            result = ", ".join(f'"{name}"' for name in names)
-        return result
-
-    def report(self, include_nonmesh: bool = False) -> str:
-        """
-        Produce a text summary of dataset structure.
-
-        Parameters
-        ----------
-        include_nonmesh : bool, default False
-            If set, also output a list of file dimensions and variables *not*
-            relating to the UGRID meshes contained.
-
-        """
-        self.result_lines = []
-        self._mesh_report()
-        if include_nonmesh:
-            self._nonmesh_report()
-        return "\n".join(self.result_lines)
-
-    def _mesh_report(self):
-        if not self.mesh_vars:
-            self._line("Meshes : <none>")
-        else:
-            self._line("Meshes")
-            for mesh_name, mesh_var in self.mesh_vars.items():
-                self._line(f'"{mesh_name}"', 1)
-                dims = self.mesh_location_dims[mesh_name]
-                # Nodes is a bit 'special'
-                dim = dims["node"]
-                if not dim:
-                    self._line("<? no node coordinates or dimension ?>", 2)
-                else:
-                    self._line(f'node("{dim}")', 2)
-                    coords = self._varlist_str(mesh_var, "node_coordinates")
-                    self._line(f"coordinates : {coords}", 3)
-                # Other dims all reported in the same way
-                for location in ("edge", "face", "boundary"):
-                    dim = dims[location]
-                    if dim:
-                        self._line(f'{location}("{dim}")', 2)
-                        attr_name = f"{location}_node_connectivity"
-                        conn_str = self._varlist_str(mesh_var, attr_name)
-                        self._line(f"{attr_name} : {conn_str}", 3)
-                        coord_name = f"{location}_coordinates"
-                        if coord_name in mesh_var.attributes:
-                            coords = self._varlist_str(mesh_var, coord_name)
-                            self._line(f"coordinates : {coords}", 3)
-                # List *optional* connectivities of the mesh
-                # N.B. the "<x>_node..." are required connectivities, which
-                # are displayed above, under their locations.
-                # Now display any others (optional) in a separate section.
-                optional_conns = []
-                for attr_name in _VALID_CONNECTIVITY_ROLES:
-                    if attr_name.split("_")[1] != "node":
-                        attr_value = property_as_single_name(
-                            mesh_var.attributes.get(attr_name)
-                        )
-                        if attr_value:
-                            if attr_value in self.all_file_vars:
-                                attr_text = f'"{attr_value}"'
-                            else:
-                                attr_text = f'<?nonexistent?> "{attr_value}"'
-                            optional_conns.append((attr_name, attr_text))
-
-                if optional_conns:
-                    self._line("optional connectivities", 2)
-                    for attr_name, attr_text in optional_conns:
-                        self._line(f"{attr_name} : {attr_text}", 3)
-
-        if self.lis_vars:
-            self._line("")
-            self._line("Location Index Sets")
-            for lis_name, lis_var in self.lis_vars.items():
-                mesh = lis_var.attributes.get("mesh", "? <none>")
-                location = lis_var.attributes.get("location", "? <none>")
-                dims = self.mesh_location_dims.get(lis_name, {})
-                dim_name = dims.get(str(location), "? <none>")
-                self._line(f'"{lis_name}" ({dim_name})', 1)
-                self._line(f'mesh : "{mesh}"', 2)
-                self._line(f"location : {location}", 2)
-
-        if self.orphan_connectivities:
-            self._line("")
-            self._line("?? Connectivities with no mesh ??")
-            for conn_name, conn_var in self.orphan_connectivities.items():
-                dims = ", ".join(f'"{dim}"' for dim in conn_var.dimensions)
-                self._line(f'"{conn_name}" ({dims})', 1)
-                cf_role = self._varlist_str(conn_var, "cf_role")
-                self._line(f"cf_role = {cf_role}", 2)
-
-        if self.meshdata_vars:
-            self._line("")
-            self._line("Mesh Data Variables")
-            for var_name, var in self.meshdata_vars.items():
-                self._line(f'"{var_name}"', 1)
-                attrs = {
-                    attr_name: var.attributes.get(attr_name)
-                    for attr_name in ("mesh", "location", "location_index_set")
-                }
-                # 'treat as' mirrors logic in 'Checker.check_meshdata_var'
-                treat_as_lis = attrs["location_index_set"] and (
-                    not attrs["mesh"] or not attrs["location"]
-                )
-                if treat_as_lis:
-                    order_and_expected = [
-                        ("location_index_set", True),
-                        ("mesh", False),
-                        ("location", False),
-                    ]
-                else:
-                    order_and_expected = [
-                        ("mesh", True),
-                        ("location", True),
-                        ("location_index_set", False),
-                    ]
-                for attr_name, expected in order_and_expected:
-                    attr = attrs[attr_name]
-                    value = None
-                    if attr:
-                        value = self._varlist_str(var, attr_name)
-                        if not expected:
-                            value = f"<?unexpected?> {value}"
-                    elif expected:
-                        value = "<?missing?>"
-                    if value:
-                        self._line(f"{attr_name} : {value}", 2)
-
-    def _nonmesh_report(self):
-        # A non-mesh var is one that is not referenced by any UGRID mesh
-        # components.
-        all_mesh_varnames = (
-            set(self.mesh_vars.keys())
-            | set(self.lis_vars.keys())
-            | set(self.meshdata_vars.keys())
-            | set(self.orphan_connectivities.keys())
-        )
-        nonmesh_vars = set(self.all_file_vars.keys()) - all_mesh_varnames
-
-        # A mesh dimension is one that is a location dim of any
-        # mesh, or any connectivity (e.g. includes dims used for
-        # nodes of a face).
-        nonmesh_dims = set(self.all_file_dims.keys())
-
-        # Exclude from 'nonmesh' : all dims and vars of each mesh.
-        for meshvar in self.mesh_vars.values():
-            # Exclude all mesh location dims.
-            mesh_dims = self.mesh_location_dims[meshvar.name]
-            nonmesh_dims -= set(mesh_dims.values())
-
-            # Exclude all location coordinates, and their bounds vars.
-            for location in _VALID_UGRID_LOCATIONS:
-                attrname = f"{location}_coordinates"
-                attr = meshvar.attributes.get(attrname)
-                location_coord_names = property_namelist(attr)
-                nonmesh_vars -= set(location_coord_names)
-                for coord_name in location_coord_names:
-                    coord_var = self.all_file_vars.get(coord_name)
-                    bounds_attr = coord_var.attributes.get("bounds")
-                    bounds_varname = property_as_single_name(bounds_attr)
-                    if bounds_varname:
-                        nonmesh_vars.discard(bounds_varname)
-
-            # Exclude all connectivities, and all their dims.
-            for attrname in _VALID_CONNECTIVITY_ROLES:
-                conn_attr = meshvar.attributes.get(attrname)
-                conn_name = property_as_single_name(conn_attr)
-                if conn_name:
-                    nonmesh_vars.discard(conn_name)
-                    conn_var = self.all_file_vars.get(conn_name)
-                    if conn_var:
-                        nonmesh_dims -= set(conn_var.dimensions)
-
-        # Also exclude all dimensions of 'orphan' connectivities.
-        for conn_var in self.orphan_connectivities.values():
-            nonmesh_dims -= set(conn_var.dimensions)
-
-        # Add report section, if any nonmesh found.
-        if nonmesh_dims or nonmesh_vars:
-            self._line("")
-            self._line("Non-mesh variables and/or dimensions")
-            if nonmesh_dims:
-                self._line("dimensions:", 1)
-                for dim in sorted(nonmesh_dims):
-                    self._line(f'"{dim}"', 2)
-            if nonmesh_vars:
-                self._line("variables:", 1)
-                for var in sorted(nonmesh_vars):
-                    self._line(f'"{var}"', 2)
+        return self.file_structure().report(include_nonmesh=include_nonmesh)
 
 
 def check_dataset(
