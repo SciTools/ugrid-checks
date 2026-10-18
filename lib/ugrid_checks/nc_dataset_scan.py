@@ -50,7 +50,7 @@ class NcVariableSummary:
     shape: Tuple[int, ...]  #
 
     #: Numpy dtype, consistent with 'data', if any
-    dtype: object
+    dtype: np.dtype
 
     #: Attributes : values are numpy scalars or 0-1 dimensional arrays
     attributes: Mapping[Text, np.ndarray]
@@ -86,11 +86,13 @@ class NcVariableSummary:
 class NcDimSummary:
     """An object containing details of a Netcdf file dimension."""
 
+    name: str
     length: int
     is_unlimited: bool
 
-    def __init__(self, length, is_unlimited=False):
+    def __init__(self, name: str, length: int, is_unlimited: bool = False):
         """Enhanced init to support optional is_unlimited arg."""
+        self.name = name
         self.length = length
         self.is_unlimited = is_unlimited
 
@@ -129,7 +131,9 @@ def scan_dataset(filepath) -> NcFileSummary:
     ds = nc.Dataset(filepath)
     # dims dict is {name: len}
     dims_summary = {
-        name: NcDimSummary(length=dim.size, is_unlimited=dim.isunlimited())
+        name: NcDimSummary(
+            name=name, length=dim.size, is_unlimited=dim.isunlimited()
+        )
         for name, dim in ds.dimensions.items()
     }
 

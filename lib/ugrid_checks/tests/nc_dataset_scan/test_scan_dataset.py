@@ -54,9 +54,9 @@ def test_dimensions(standard_dataset_testscan):
     dims = standard_dataset_testscan.dimensions
     assert len(dims) == 3
     assert list(dims.keys()) == ["x", "y", "t"]
-    assert dims["x"] == NcDimSummary(length=3, is_unlimited=False)
-    assert dims["y"] == NcDimSummary(length=4, is_unlimited=False)
-    assert dims["t"] == NcDimSummary(length=2, is_unlimited=True)
+    assert dims["x"] == NcDimSummary(name="x", length=3, is_unlimited=False)
+    assert dims["y"] == NcDimSummary(name="y", length=4, is_unlimited=False)
+    assert dims["t"] == NcDimSummary(name="t", length=2, is_unlimited=True)
 
 
 def test_variables(standard_dataset_testscan):
